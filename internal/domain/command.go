@@ -15,6 +15,7 @@ const (
 	CommandAsync    // 並列実行モード
 	CommandListPRs  // PR一覧表示
 	CommandReviewPR // 指定したPRをレビュー
+	CommandHelp     // ヘルプ表示
 )
 
 // DetectCommand detects special commands in the message text.
@@ -64,6 +65,11 @@ func DetectCommand(text string) Command {
 	// Review specific PR
 	if strings.HasPrefix(lower, "review-pr ") || strings.HasPrefix(lower, "prレビュー ") {
 		return CommandReviewPR
+	}
+
+	// Help
+	if lower == "help" || lower == "ヘルプ" || lower == "?" {
+		return CommandHelp
 	}
 
 	return CommandNone

@@ -107,6 +107,9 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 		case domain.CommandReviewPR:
 			a.handleReviewPR(session, instruction)
 			return
+		case domain.CommandHelp:
+			a.handleHelp(channel, threadTS)
+			return
 		}
 
 		// Check if already running
@@ -129,6 +132,9 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 			return
 		case domain.CommandListPRs:
 			a.handleListPRsNoSession(channel, threadTS)
+			return
+		case domain.CommandHelp:
+			a.handleHelp(channel, threadTS)
 			return
 		}
 	}
@@ -593,4 +599,33 @@ func (a *Agent) getPRDiff(repo *domain.Repository, prNumber string) (string, err
 
 	return fmt.Sprintf("## PR詳細\n%s\n\n## Diff\n```diff\n%s\n```",
 		string(viewOutput), string(diffOutput)), nil
+}
+
+func (a *Agent) handleHelp(channel, threadTS string) {
+	helpText := "*📚 利用可能なコマンド*\n\n" +
+		"*基本操作:*\n" +
+		"• `@bot <タスク内容>` - タスクを実行\n" +
+		"• `end` / `終了` / `おわり` - セッションを終了\n\n" +
+		"*モード切り替え:*\n" +
+		"• `review` / `レビュー` - レビューモードに切り替え\n" +
+		"• `implement` / `実装` - 実装モードに切り替え（デフォルト）\n" +
+		"• `sync` / `順次` - 順次実行モード\n" +
+		"• `async` / `並列` - 並列実行モード（デフォルト）\n\n" +
+		"*リポジトリ管理:*\n" +
+		"• `repos` / `repositories` / `リポジトリ` - 利用可能なリポジトリ一覧\n" +
+		"• `switch owner/repo` / `切り替え owner/repo` - リポジトリを切り替え\n\n" +
+		"*PRレビュー:*\n" +
+		"• `list-prs` / `prs` / `PR一覧` - 開いているPR一覧を表示\n" +
+		"• `review-pr <番号>` / `PRレビュー <番号>` - 指定したPRをレビュー\n\n" +
+		"*ヘルプ:*\n" +
+		"• `help` / `ヘルプ` / `?` - このヘルプを表示\n\n" +
+		"*使用例:*\n" +
+		"```\n" +
+		"@bot ユーザー認証機能を追加して\n" +
+		"@bot switch myorg/frontend\n" +
+		"@bot list-prs\n" +
+		"@bot review-pr 123\n" +
+		"```"
+
+	a.slackClient.PostThreadMessage(channel, threadTS, helpText)
 }

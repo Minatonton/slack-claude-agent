@@ -146,15 +146,16 @@ func (a *Agent) continueSession(session *domain.Session, instruction string) {
 
 	session.UpdateActivity()
 
-	// Post new status message
+	// Post new status message (emphasize continuation)
 	mode := session.GetMode()
 	modeIcon := ":hammer_and_wrench:"
 	if mode == domain.ModeReview {
 		modeIcon = ":mag:"
 	}
 
+	repo := session.GetRepository()
 	msgTS, _ := a.slackClient.PostThreadMessageReturningTS(session.Channel, session.ThreadTS,
-		fmt.Sprintf(":hourglass_flowing_sand: 処理中... (モード: %s %s)", modeIcon, mode.String()))
+		fmt.Sprintf(":speech_balloon: 会話を継続中... (リポジトリ: %s, モード: %s %s)", repo.Key(), modeIcon, mode.String()))
 	session.Mu.Lock()
 	session.StatusMsgTS = msgTS
 	session.Mu.Unlock()

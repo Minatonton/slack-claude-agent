@@ -16,11 +16,12 @@ type MentionHandler interface {
 }
 
 type Event struct {
-	Type    string `json:"type"`
-	User    string `json:"user"`
-	Text    string `json:"text"`
-	Channel string `json:"channel"`
-	TS      string `json:"ts"`
+	Type     string `json:"type"`
+	User     string `json:"user"`
+	Text     string `json:"text"`
+	Channel  string `json:"channel"`
+	TS       string `json:"ts"`
+	ThreadTS string `json:"thread_ts,omitempty"` // Thread timestamp (if in a thread)
 }
 
 type Handler struct {
@@ -108,11 +109,12 @@ func (h *Handler) processEvent(evt socketmode.Event) {
 				)
 
 				event := Event{
-					Type:    ev.Type,
-					User:    ev.User,
-					Text:    ev.Text,
-					Channel: ev.Channel,
-					TS:      ev.TimeStamp,
+					Type:     ev.Type,
+					User:     ev.User,
+					Text:     ev.Text,
+					Channel:  ev.Channel,
+					TS:       ev.TimeStamp,
+					ThreadTS: ev.ThreadTimeStamp, // Thread timestamp for replies
 				}
 				go h.mentionHandler.HandleMention(event)
 			}

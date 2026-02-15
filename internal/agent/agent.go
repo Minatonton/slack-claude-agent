@@ -40,9 +40,16 @@ func New(sc *slackclient.Client, runners map[string]*claude.Runner, repos []*dom
 
 func (a *Agent) HandleMention(event slackclient.Event) {
 	channel := event.Channel
-	threadTS := event.TS
 	user := event.User
 	text := event.Text
+
+	// Determine thread timestamp
+	// If this is a reply in a thread, use the thread's root timestamp
+	// Otherwise, use the current message timestamp (start a new thread)
+	threadTS := event.TS
+	if event.ThreadTS != "" {
+		threadTS = event.ThreadTS
+	}
 
 	// Extract instruction (remove bot mention)
 	instruction := botMentionRe.ReplaceAllString(text, "")

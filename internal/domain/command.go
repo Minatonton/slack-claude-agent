@@ -11,8 +11,10 @@ const (
 	CommandImplement
 	CommandSwitch
 	CommandRepos
-	CommandSync  // 順次実行モード
-	CommandAsync // 並列実行モード
+	CommandSync     // 順次実行モード
+	CommandAsync    // 並列実行モード
+	CommandListPRs  // PR一覧表示
+	CommandReviewPR // 指定したPRをレビュー
 )
 
 // DetectCommand detects special commands in the message text.
@@ -54,6 +56,16 @@ func DetectCommand(text string) Command {
 		return CommandAsync
 	}
 
+	// List pull requests
+	if lower == "list-prs" || lower == "prs" || lower == "pr一覧" || lower == "pr list" {
+		return CommandListPRs
+	}
+
+	// Review specific PR
+	if strings.HasPrefix(lower, "review-pr ") || strings.HasPrefix(lower, "prレビュー ") {
+		return CommandReviewPR
+	}
+
 	return CommandNone
 }
 
@@ -75,6 +87,30 @@ func ExtractSwitchTarget(text string) string {
 		parts := strings.SplitN(text, " ", 2)
 		if len(parts) == 2 {
 			return strings.TrimSpace(parts[1])
+		}
+	}
+
+	return ""
+}
+
+// ExtractPRNumber extracts the PR number from a review-pr command.
+// Expected format: "review-pr 123" or "PRレビュー 123"
+func ExtractPRNumber(text string) string {
+	lower := strings.ToLower(strings.TrimSpace(text))
+
+	// Try "review-pr 123"
+	if strings.HasPrefix(lower, "review-pr ") {
+		parts := strings.Fields(text)
+		if len(parts) >= 2 {
+			return parts[1]
+		}
+	}
+
+	// Try "PRレビュー 123"
+	if strings.HasPrefix(lower, "prレビュー ") {
+		parts := strings.Fields(text)
+		if len(parts) >= 2 {
+			return parts[1]
 		}
 	}
 

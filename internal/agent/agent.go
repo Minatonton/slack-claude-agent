@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -100,6 +101,12 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 			a.slackClient.PostThreadMessage(channel, threadTS,
 				fmt.Sprintf(":fast_forward: 並列実行モードに切り替えました（複数タスクを同時実行）"))
 			return
+		case domain.CommandListPRs:
+			a.handleListPRs(session)
+			return
+		case domain.CommandReviewPR:
+			a.handleReviewPR(session, instruction)
+			return
 		}
 
 		// Check if already running
@@ -119,6 +126,9 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 		switch cmd {
 		case domain.CommandRepos:
 			a.handleListReposNoSession(channel, threadTS)
+			return
+		case domain.CommandListPRs:
+			a.handleListPRsNoSession(channel, threadTS)
 			return
 		}
 	}
@@ -462,4 +472,125 @@ func (a *Agent) handleListReposNoSession(channel, threadTS string) {
 	msg := fmt.Sprintf(":books: *利用可能なリポジトリ:*\n%s\n\nリポジトリを切り替えるには: `switch owner/repo`",
 		strings.Join(repoList, "\n"))
 	a.slackClient.PostThreadMessage(channel, threadTS, msg)
+}
+
+func (a *Agent) handleListPRs(session *domain.Session) {
+	a.handleListPRsNoSession(session.Channel, session.ThreadTS)
+}
+
+func (a *Agent) handleListPRsNoSession(channel, threadTS string) {
+	// Get current repository
+	var repo *domain.Repository
+	if threadTS != "" {
+		a.mu.RLock()
+		session, exists := a.sessions[threadTS]
+		a.mu.RUnlock()
+		if exists {
+			repo = session.GetRepository()
+		}
+	}
+	if repo == nil {
+		repo = a.defaultRepo
+	}
+
+	a.slackClient.PostThreadMessage(channel, threadTS,
+		fmt.Sprintf(":hourglass: %s のPR一覧を取得中...", repo.Key()))
+
+	// Get PR list using gh CLI
+	prList, err := a.getPRList(repo)
+	if err != nil {
+		a.slackClient.PostThreadMessage(channel, threadTS,
+			fmt.Sprintf(":x: PR一覧の取得に失敗しました: %s", err.Error()))
+		return
+	}
+
+	if prList == "" {
+		a.slackClient.PostThreadMessage(channel, threadTS,
+			fmt.Sprintf(":information_source: %s には開いているPRがありません", repo.Key()))
+		return
+	}
+
+	msg := fmt.Sprintf(":mag: *%s のPR一覧:*\n```\n%s\n```\n\nレビューするには: `review-pr <番号>`",
+		repo.Key(), prList)
+	a.slackClient.PostThreadMessage(channel, threadTS, msg)
+}
+
+func (a *Agent) handleReviewPR(session *domain.Session, instruction string) {
+	prNumber := domain.ExtractPRNumber(instruction)
+	if prNumber == "" {
+		a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS,
+			":warning: PR番号を指定してください。例: `review-pr 123`")
+		return
+	}
+
+	repo := session.GetRepository()
+	if repo == nil {
+		a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS,
+			":x: リポジトリが設定されていません")
+		return
+	}
+
+	// Get PR diff
+	a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS,
+		fmt.Sprintf(":hourglass: PR #%s を取得中...", prNumber))
+
+	prDiff, err := a.getPRDiff(repo, prNumber)
+	if err != nil {
+		a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS,
+			fmt.Sprintf(":x: PRの取得に失敗しました: %s", err.Error()))
+		return
+	}
+
+	// Create review prompt
+	reviewPrompt := fmt.Sprintf(`以下のPull Request (#%s)をレビューしてください。
+
+%s
+
+レビューポイント:
+- コードの品質
+- 潜在的なバグ
+- パフォーマンスの問題
+- セキュリティの懸念
+- コーディング規約の遵守
+- 改善提案
+
+詳細なレビューコメントを提供してください。`, prNumber, prDiff)
+
+	// Continue session with review
+	session.UpdateActivity()
+	go a.runClaude(session, reviewPrompt)
+}
+
+func (a *Agent) getPRList(repo *domain.Repository) (string, error) {
+	cmd := exec.Command("gh", "pr", "list",
+		"--repo", repo.Key(),
+		"--limit", "10")
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr list failed: %w (output: %s)", err, string(output))
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+func (a *Agent) getPRDiff(repo *domain.Repository, prNumber string) (string, error) {
+	// Get PR details
+	viewCmd := exec.Command("gh", "pr", "view", prNumber,
+		"--repo", repo.Key())
+	viewOutput, err := viewCmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr view failed: %w", err)
+	}
+
+	// Get PR diff
+	diffCmd := exec.Command("gh", "pr", "diff", prNumber,
+		"--repo", repo.Key())
+	diffOutput, err := diffCmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr diff failed: %w", err)
+	}
+
+	return fmt.Sprintf("## PR詳細\n%s\n\n## Diff\n```diff\n%s\n```",
+		string(viewOutput), string(diffOutput)), nil
 }

@@ -6,15 +6,19 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/toshin/slack-claude-agent/internal/claude"
+	"github.com/toshin/slack-claude-agent/internal/domain"
 	slackclient "github.com/toshin/slack-claude-agent/internal/slack"
 )
 
 var botMentionRe = regexp.MustCompile(`<@U[A-Z0-9]+>`)
 
 type Agent struct {
+	mu           sync.RWMutex
+	sessions     map[string]*domain.Session // key: threadTS
 	slackClient  *slackclient.Client
 	claudeRunner *claude.Runner
 	logger       *slog.Logger
@@ -22,6 +26,7 @@ type Agent struct {
 
 func New(sc *slackclient.Client, runner *claude.Runner, logger *slog.Logger) *Agent {
 	return &Agent{
+		sessions:     make(map[string]*domain.Session),
 		slackClient:  sc,
 		claudeRunner: runner,
 		logger:       logger,
@@ -29,40 +34,130 @@ func New(sc *slackclient.Client, runner *claude.Runner, logger *slog.Logger) *Ag
 }
 
 func (a *Agent) HandleMention(event slackclient.Event) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
-
 	channel := event.Channel
 	threadTS := event.TS
+	user := event.User
+	text := event.Text
 
-	logger := a.logger.With("channel", channel, "user", event.User, "thread_ts", threadTS)
-	logger.Info("handling mention")
+	// Extract instruction (remove bot mention)
+	instruction := botMentionRe.ReplaceAllString(text, "")
+	instruction = strings.TrimSpace(instruction)
 
-	// Add 👀 reaction
-	if err := a.slackClient.AddReaction(channel, threadTS, "eyes"); err != nil {
-		logger.Warn("failed to add reaction", "error", err)
+	// Detect commands
+	cmd := domain.DetectCommand(instruction)
+
+	a.mu.RLock()
+	session, exists := a.sessions[threadTS]
+	a.mu.RUnlock()
+
+	// Handle commands
+	if exists {
+		if !session.Active() {
+			return
+		}
+
+		session.UpdateActivity()
+
+		switch cmd {
+		case domain.CommandEnd:
+			a.endSession(session, user)
+			return
+		case domain.CommandReview:
+			session.SetMode(domain.ModeReview)
+			a.slackClient.PostThreadMessage(channel, threadTS,
+				fmt.Sprintf(":mag: レビューモードに切り替えました"))
+			return
+		case domain.CommandImplement:
+			session.SetMode(domain.ModeImplementation)
+			a.slackClient.PostThreadMessage(channel, threadTS,
+				fmt.Sprintf(":hammer_and_wrench: 実装モードに切り替えました"))
+			return
+		}
+
+		// Check if already running
+		if session.Running() {
+			a.slackClient.PostThreadMessage(channel, threadTS,
+				":hourglass: 現在実行中です。完了後にメッセージを処理します。しばらくお待ちください。")
+			return
+		}
 	}
 
-	// Extract instruction
-	instruction := botMentionRe.ReplaceAllString(event.Text, "")
-	instruction = strings.TrimSpace(instruction)
+	// Create new session if not exists
+	if !exists {
+		a.startNewSession(channel, threadTS, user, instruction)
+		return
+	}
+
+	// Continue existing session
+	a.continueSession(session, instruction)
+}
+
+func (a *Agent) startNewSession(channel, threadTS, user, instruction string) {
 	if instruction == "" {
 		a.slackClient.PostThreadMessage(channel, threadTS, "指示が空です。ボットをメンションして実装内容を指示してください。")
 		return
 	}
 
+	session := domain.NewSession(channel, threadTS)
+
+	a.mu.Lock()
+	a.sessions[threadTS] = session
+	a.mu.Unlock()
+
+	a.logger.Info("new session", "thread", threadTS, "channel", channel, "user", user)
+
+	// Add reaction
+	a.slackClient.AddReaction(channel, threadTS, "eyes")
+
 	// Post initial message
-	msgTS, err := a.slackClient.PostThreadMessageReturningTS(channel, threadTS, ":hourglass_flowing_sand: タスクを開始します...")
-	if err != nil {
-		logger.Error("failed to post initial message", "error", err)
+	msgTS, _ := a.slackClient.PostThreadMessageReturningTS(channel, threadTS,
+		":hourglass_flowing_sand: タスクを開始します... (モード: 実装)")
+	session.Mu.Lock()
+	session.StatusMsgTS = msgTS
+	session.Mu.Unlock()
+
+	// Run in goroutine
+	go a.runClaude(session, instruction)
+}
+
+func (a *Agent) continueSession(session *domain.Session, instruction string) {
+	if instruction == "" {
 		return
 	}
 
-	updateMsg := func(text string) {
-		if err := a.slackClient.UpdateThreadMessage(channel, msgTS, text); err != nil {
-			logger.Warn("failed to update message", "error", err)
-		}
+	session.UpdateActivity()
+
+	// Post new status message
+	mode := session.GetMode()
+	modeIcon := ":hammer_and_wrench:"
+	if mode == domain.ModeReview {
+		modeIcon = ":mag:"
 	}
+
+	msgTS, _ := a.slackClient.PostThreadMessageReturningTS(session.Channel, session.ThreadTS,
+		fmt.Sprintf(":hourglass_flowing_sand: 処理中... (モード: %s %s)", modeIcon, mode.String()))
+	session.Mu.Lock()
+	session.StatusMsgTS = msgTS
+	session.Mu.Unlock()
+
+	go a.runClaude(session, instruction)
+}
+
+func (a *Agent) runClaude(session *domain.Session, prompt string) {
+	session.SetRunning(true)
+	defer session.SetRunning(false)
+
+	startTime := time.Now()
+
+	// Create cancellable context
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	session.Mu.Lock()
+	session.CancelFunc = cancel
+	session.Mu.Unlock()
+
+	logger := a.logger.With("thread", session.ThreadTS, "channel", session.Channel)
 
 	// Track progress
 	var textBuf strings.Builder
@@ -74,9 +169,8 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 		switch evt.Type {
 		case claude.ProgressText:
 			textBuf.WriteString(evt.Text)
-			// Batch updates to avoid rate limiting
 			if time.Since(lastUpdate) > updateInterval {
-				a.sendProgressUpdate(msgTS, channel, threadTS, textBuf.String(), toolHistory)
+				a.sendProgressUpdate(session, textBuf.String(), toolHistory)
 				lastUpdate = time.Now()
 			}
 
@@ -86,25 +180,37 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 				Summary: claude.FormatToolSummary(evt.ToolName, evt.ToolInput),
 			}
 			toolHistory = append(toolHistory, entry)
-			a.sendProgressUpdate(msgTS, channel, threadTS, textBuf.String(), toolHistory)
+			a.sendProgressUpdate(session, textBuf.String(), toolHistory)
 			lastUpdate = time.Now()
 
 		case claude.ProgressComplete:
 			if evt.Result != nil && evt.Result.IsError {
-				updateMsg(fmt.Sprintf(":warning: エラーが発生しました: %s", evt.Result.Result))
+				a.updateMessage(session, fmt.Sprintf(":warning: エラーが発生しました: %s", evt.Result.Result))
 			}
 		}
 	}
 
+	// Get session info
+	mode := session.GetMode()
+	session.Mu.Lock()
+	sessionID := session.SessionID
+	session.Mu.Unlock()
+
 	// Run claude
-	startTime := time.Now()
-	result, err := a.claudeRunner.Run(ctx, instruction, callback)
+	result, err := a.claudeRunner.Run(ctx, prompt, mode, sessionID, callback)
 	elapsed := time.Since(startTime)
 
 	if err != nil {
 		logger.Error("claude run failed", "error", err)
-		updateMsg(fmt.Sprintf(":x: Claude実行エラー: %s", err))
+		a.updateMessage(session, fmt.Sprintf(":x: Claude実行エラー: %s", err))
 		return
+	}
+
+	// Store session ID for resume
+	if result != nil && result.SessionID != "" {
+		session.Mu.Lock()
+		session.SessionID = result.SessionID
+		session.Mu.Unlock()
 	}
 
 	// Build final message
@@ -118,11 +224,24 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 		finalMsg = summary
 	}
 
-	updateMsg(finalMsg)
+	a.updateMessage(session, finalMsg)
 
 	// Add completion reaction
-	a.slackClient.AddReaction(channel, threadTS, "white_check_mark")
-	logger.Info("task completed successfully")
+	a.slackClient.AddReaction(session.Channel, session.ThreadTS, "white_check_mark")
+	logger.Info("task completed successfully", "mode", mode.String())
+}
+
+func (a *Agent) endSession(session *domain.Session, user string) {
+	session.Deactivate()
+
+	a.logger.Info("ending session", "thread", session.ThreadTS, "user", user)
+
+	a.mu.Lock()
+	delete(a.sessions, session.ThreadTS)
+	a.mu.Unlock()
+
+	a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS,
+		":wave: セッションを終了しました。")
 }
 
 type toolEntry struct {
@@ -130,7 +249,11 @@ type toolEntry struct {
 	Summary string
 }
 
-func (a *Agent) sendProgressUpdate(msgTS, channel, threadTS, text string, tools []toolEntry) {
+func (a *Agent) sendProgressUpdate(session *domain.Session, text string, tools []toolEntry) {
+	session.Mu.Lock()
+	msgTS := session.StatusMsgTS
+	session.Mu.Unlock()
+
 	if msgTS == "" {
 		return
 	}
@@ -155,12 +278,11 @@ func (a *Agent) sendProgressUpdate(msgTS, channel, threadTS, text string, tools 
 		for i := start; i < len(tools)-1; i++ {
 			history = append(history, fmt.Sprintf("  %s %s", ":white_check_mark:", tools[i].Summary))
 		}
-		// Current (last) tool with spinner
 		history = append(history, fmt.Sprintf("  %s %s", ":hourglass_flowing_sand:", tools[len(tools)-1].Summary))
 		parts = append(parts, strings.Join(history, "\n"))
 	}
 
-	// Show text progress (truncated to tail)
+	// Show text progress (truncated)
 	if text != "" {
 		display := text
 		if len(display) > 2000 {
@@ -169,7 +291,19 @@ func (a *Agent) sendProgressUpdate(msgTS, channel, threadTS, text string, tools 
 		parts = append(parts, formatForSlack(display))
 	}
 
-	a.slackClient.UpdateThreadMessage(channel, msgTS, strings.Join(parts, "\n\n"))
+	a.slackClient.UpdateThreadMessage(session.Channel, msgTS, strings.Join(parts, "\n\n"))
+}
+
+func (a *Agent) updateMessage(session *domain.Session, text string) {
+	session.Mu.Lock()
+	msgTS := session.StatusMsgTS
+	session.Mu.Unlock()
+
+	if msgTS != "" {
+		a.slackClient.UpdateThreadMessage(session.Channel, msgTS, text)
+	} else {
+		a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS, text)
+	}
 }
 
 func buildSummary(tools []toolEntry, result *claude.Result, elapsed time.Duration) string {
@@ -214,13 +348,11 @@ func formatDuration(d time.Duration) string {
 }
 
 func formatForSlack(text string) string {
-	// Basic conversions
-	text = strings.ReplaceAll(text, "**", "*")  // bold
-	text = strings.ReplaceAll(text, "###", "*") // h3 → bold
-	text = strings.ReplaceAll(text, "## ", "*") // h2 → bold
-	text = strings.ReplaceAll(text, "# ", "*")  // h1 → bold
+	text = strings.ReplaceAll(text, "**", "*")
+	text = strings.ReplaceAll(text, "###", "*")
+	text = strings.ReplaceAll(text, "## ", "*")
+	text = strings.ReplaceAll(text, "# ", "*")
 
-	// Trim excessive whitespace
 	lines := strings.Split(text, "\n")
 	var result []string
 	emptyCount := 0

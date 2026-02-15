@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/toshin/slack-claude-agent/internal/domain"
 )
 
 type Runner struct {
@@ -56,7 +58,7 @@ func NewRunner(cfg Config, logger *slog.Logger) *Runner {
 
 // Run executes claude CLI with the given prompt.
 // workDir is where the repository is located.
-func (r *Runner) Run(ctx context.Context, prompt string, callback ProgressCallback) (*Result, error) {
+func (r *Runner) Run(ctx context.Context, prompt string, mode domain.AgentMode, sessionID string, callback ProgressCallback) (*Result, error) {
 	// Acquire semaphore
 	select {
 	case r.semaphore <- struct{}{}:
@@ -66,15 +68,21 @@ func (r *Runner) Run(ctx context.Context, prompt string, callback ProgressCallba
 	}
 
 	// Build full prompt with instructions
-	fullPrompt := r.buildPrompt(prompt)
+	fullPrompt := r.buildPrompt(prompt, mode)
 
 	args := []string{
 		"--print",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--dangerously-skip-permissions",
-		fullPrompt,
 	}
+
+	// Resume session if sessionID is provided
+	if sessionID != "" {
+		args = append(args, "--resume", sessionID)
+	}
+
+	args = append(args, fullPrompt)
 
 	workDir := filepath.Join(r.workspacePath, r.githubRepo)
 	r.logger.Info("running claude", "workdir", workDir, "args_count", len(args))
@@ -117,17 +125,10 @@ func (r *Runner) Run(ctx context.Context, prompt string, callback ProgressCallba
 	return result, nil
 }
 
-func (r *Runner) buildPrompt(instruction string) string {
-	return fmt.Sprintf(`%s
-
+func (r *Runner) buildPrompt(instruction string, mode domain.AgentMode) string {
+	commonRules := fmt.Sprintf(`
 Repository: %s/%s
 Default branch: %s
-
-Instructions:
-1. Implement the requested changes
-2. Create a new branch with a descriptive name
-3. Commit your changes with a clear commit message
-4. Create a pull request using 'gh pr create'
 
 When creating commits, use this format:
 git commit -m "Your commit message
@@ -140,7 +141,6 @@ CRITICAL RULES:
 - NEVER force push (git push -f, git push --force)
 - Always create a feature branch and push to that branch, then create a PR
 `,
-		instruction,
 		r.githubOwner,
 		r.githubRepo,
 		r.defaultBranch,
@@ -148,13 +148,58 @@ CRITICAL RULES:
 		r.coAuthorEmail,
 		r.defaultBranch,
 	)
+
+	switch mode {
+	case domain.ModeReview:
+		return fmt.Sprintf(`%s
+%s
+
+MODE: CODE REVIEW
+
+Instructions:
+1. Review the code changes carefully
+2. Check for bugs, security issues, performance problems, and best practices
+3. Provide constructive feedback with specific suggestions
+4. If changes are needed, create a review comment on the PR
+5. DO NOT make code changes directly - only provide review feedback
+
+Focus on:
+- Code quality and maintainability
+- Security vulnerabilities
+- Performance issues
+- Best practices and conventions
+- Edge cases and error handling
+`,
+			instruction,
+			commonRules,
+		)
+
+	case domain.ModeImplementation:
+		fallthrough
+	default:
+		return fmt.Sprintf(`%s
+%s
+
+MODE: IMPLEMENTATION
+
+Instructions:
+1. Implement the requested changes
+2. Create a new branch with a descriptive name
+3. Commit your changes with a clear commit message
+4. Create a pull request using 'gh pr create'
+5. Write clean, maintainable code following best practices
+`,
+			instruction,
+			commonRules,
+		)
+	}
 }
 
 // RunWithTimeout wraps Run with a timeout.
-func (r *Runner) RunWithTimeout(ctx context.Context, prompt string, timeout time.Duration, callback ProgressCallback) (*Result, error) {
+func (r *Runner) RunWithTimeout(ctx context.Context, prompt string, mode domain.AgentMode, sessionID string, timeout time.Duration, callback ProgressCallback) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return r.Run(ctx, prompt, callback)
+	return r.Run(ctx, prompt, mode, sessionID, callback)
 }
 
 // FormatToolSummary creates a human-readable summary of a tool invocation.

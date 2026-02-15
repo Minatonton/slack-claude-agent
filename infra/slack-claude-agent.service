@@ -1,0 +1,15 @@
+[Unit]
+Description=Slack Claude Agent
+After=network.target
+
+[Service]
+Type=simple
+User=slackbot
+WorkingDirectory=/opt/slack-claude-agent
+ExecStart=/opt/slack-claude-agent/server
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/slack-claude-agent/.env
+
+[Install]
+WantedBy=multi-user.target

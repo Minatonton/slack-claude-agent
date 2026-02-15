@@ -20,17 +20,6 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
   --member="serviceAccount:${SERVICE_ACCOUNT}" \
   --role="roles/secretmanager.secretAccessor"
 
-echo "=== Reserving static IP ==="
-gcloud compute addresses create slack-claude-agent-ip \
-  --region=asia-northeast1 \
-  --project=$PROJECT_ID
-
-echo "=== Creating firewall rule ==="
-gcloud compute firewall-rules create allow-https \
-  --allow=tcp:443 \
-  --target-tags=allow-https \
-  --project=$PROJECT_ID
-
 echo "=== Creating instance ==="
 gcloud compute instances create $INSTANCE_NAME \
   --zone=$ZONE \
@@ -39,14 +28,8 @@ gcloud compute instances create $INSTANCE_NAME \
   --image-project=ubuntu-os-cloud \
   --service-account=$SERVICE_ACCOUNT \
   --scopes=cloud-platform \
-  --tags=allow-https \
-  --address=slack-claude-agent-ip \
   --metadata-from-file=startup-script=startup-script.sh \
   --project=$PROJECT_ID
 
 echo "=== Done ==="
-echo "Static IP:"
-gcloud compute addresses describe slack-claude-agent-ip \
-  --region=asia-northeast1 \
-  --format="value(address)" \
-  --project=$PROJECT_ID
+echo "Instance created. No static IP or firewall rules needed for Socket Mode."

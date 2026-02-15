@@ -282,60 +282,21 @@ type toolEntry struct {
 }
 
 func (a *Agent) sendProgressUpdate(session *domain.Session, text string, tools []toolEntry) {
-	session.Mu.Lock()
-	msgTS := session.StatusMsgTS
-	session.Mu.Unlock()
-
-	if msgTS == "" {
+	// ツール実行時のみ新規メッセージを投稿（ログを残すため）
+	if len(tools) == 0 {
 		return
 	}
 
-	var parts []string
+	last := tools[len(tools)-1]
+	message := fmt.Sprintf(":wrench: %s", last.Summary)
 
-	// Show current activity
-	if len(tools) > 0 {
-		last := tools[len(tools)-1]
-		parts = append(parts, fmt.Sprintf(":wrench: %s", last.Summary))
-	} else {
-		parts = append(parts, ":hourglass_flowing_sand: 処理中...")
-	}
-
-	// Show tool history (last 8 entries)
-	if len(tools) > 1 {
-		var history []string
-		start := 0
-		if len(tools) > 8 {
-			start = len(tools) - 8
-		}
-		for i := start; i < len(tools)-1; i++ {
-			history = append(history, fmt.Sprintf("  %s %s", ":white_check_mark:", tools[i].Summary))
-		}
-		history = append(history, fmt.Sprintf("  %s %s", ":hourglass_flowing_sand:", tools[len(tools)-1].Summary))
-		parts = append(parts, strings.Join(history, "\n"))
-	}
-
-	// Show text progress (truncated)
-	if text != "" {
-		display := text
-		if len(display) > 2000 {
-			display = "...\n" + display[len(display)-2000:]
-		}
-		parts = append(parts, formatForSlack(display))
-	}
-
-	a.slackClient.UpdateThreadMessage(session.Channel, msgTS, strings.Join(parts, "\n\n"))
+	// 新規メッセージとして投稿（更新しない）
+	a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS, message)
 }
 
 func (a *Agent) updateMessage(session *domain.Session, text string) {
-	session.Mu.Lock()
-	msgTS := session.StatusMsgTS
-	session.Mu.Unlock()
-
-	if msgTS != "" {
-		a.slackClient.UpdateThreadMessage(session.Channel, msgTS, text)
-	} else {
-		a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS, text)
-	}
+	// 常に新規メッセージとして投稿（ログを残すため）
+	a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS, text)
 }
 
 func buildSummary(tools []toolEntry, result *claude.Result, elapsed time.Duration) string {

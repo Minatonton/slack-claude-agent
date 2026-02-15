@@ -9,6 +9,8 @@ const (
 	CommandEnd
 	CommandReview
 	CommandImplement
+	CommandSwitch
+	CommandRepos
 )
 
 // DetectCommand detects special commands in the message text.
@@ -30,5 +32,39 @@ func DetectCommand(text string) Command {
 		return CommandImplement
 	}
 
+	// Switch repository
+	if strings.HasPrefix(lower, "switch ") || strings.HasPrefix(lower, "切り替え ") {
+		return CommandSwitch
+	}
+
+	// List repositories
+	if lower == "repos" || lower == "repositories" || lower == "リポジトリ" {
+		return CommandRepos
+	}
+
 	return CommandNone
+}
+
+// ExtractSwitchTarget extracts the target repository from a switch command.
+// Returns the repository key (e.g., "owner/repo") or empty string if not found.
+func ExtractSwitchTarget(text string) string {
+	lower := strings.ToLower(strings.TrimSpace(text))
+
+	// Try "switch owner/repo"
+	if strings.HasPrefix(lower, "switch ") {
+		parts := strings.SplitN(text, " ", 2)
+		if len(parts) == 2 {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+
+	// Try "切り替え owner/repo"
+	if strings.HasPrefix(lower, "切り替え ") {
+		parts := strings.SplitN(text, " ", 2)
+		if len(parts) == 2 {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+
+	return ""
 }

@@ -31,7 +31,8 @@ type Session struct {
 	ThreadTS     string
 	Channel      string
 	Mode         AgentMode
-	SessionID    string // Claude session ID for resume
+	Repository   *Repository // Current repository for this session
+	SessionID    string      // Claude session ID for resume
 	IsRunning    bool
 	IsActive     bool
 	StatusMsgTS  string
@@ -39,11 +40,12 @@ type Session struct {
 	CancelFunc   context.CancelFunc
 }
 
-func NewSession(channel, threadTS string) *Session {
+func NewSession(channel, threadTS string, defaultRepo *Repository) *Session {
 	return &Session{
 		ThreadTS:     threadTS,
 		Channel:      channel,
 		Mode:         ModeImplementation, // デフォルトは実装モード
+		Repository:   defaultRepo,
 		IsActive:     true,
 		LastActivity: time.Now(),
 	}
@@ -92,4 +94,16 @@ func (s *Session) Active() bool {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 	return s.IsActive
+}
+
+func (s *Session) SetRepository(repo *Repository) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.Repository = repo
+}
+
+func (s *Session) GetRepository() *Repository {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	return s.Repository
 }

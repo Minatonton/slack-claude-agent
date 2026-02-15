@@ -24,30 +24,50 @@ func (m AgentMode) String() string {
 	}
 }
 
+type ExecutionMode int
+
+const (
+	ExecutionAsync ExecutionMode = iota // デフォルト: 非同期実行（並列）
+	ExecutionSync                        // 同期実行（順次）
+)
+
+func (e ExecutionMode) String() string {
+	switch e {
+	case ExecutionSync:
+		return "順次実行"
+	case ExecutionAsync:
+		return "並列実行"
+	default:
+		return "不明"
+	}
+}
+
 // Session represents a conversation session in a Slack thread.
 type Session struct {
 	Mu sync.Mutex // Exported for external access
 
-	ThreadTS     string
-	Channel      string
-	Mode         AgentMode
-	Repository   *Repository // Current repository for this session
-	SessionID    string      // Claude session ID for resume
-	IsRunning    bool
-	IsActive     bool
-	StatusMsgTS  string
-	LastActivity time.Time
-	CancelFunc   context.CancelFunc
+	ThreadTS      string
+	Channel       string
+	Mode          AgentMode
+	ExecutionMode ExecutionMode // Sync or Async execution
+	Repository    *Repository   // Current repository for this session
+	SessionID     string        // Claude session ID for resume
+	IsRunning     bool
+	IsActive      bool
+	StatusMsgTS   string
+	LastActivity  time.Time
+	CancelFunc    context.CancelFunc
 }
 
 func NewSession(channel, threadTS string, defaultRepo *Repository) *Session {
 	return &Session{
-		ThreadTS:     threadTS,
-		Channel:      channel,
-		Mode:         ModeImplementation, // デフォルトは実装モード
-		Repository:   defaultRepo,
-		IsActive:     true,
-		LastActivity: time.Now(),
+		ThreadTS:      threadTS,
+		Channel:       channel,
+		Mode:          ModeImplementation, // デフォルトは実装モード
+		ExecutionMode: ExecutionAsync,     // デフォルトは並列実行
+		Repository:    defaultRepo,
+		IsActive:      true,
+		LastActivity:  time.Now(),
 	}
 }
 
@@ -106,4 +126,16 @@ func (s *Session) GetRepository() *Repository {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 	return s.Repository
+}
+
+func (s *Session) SetExecutionMode(mode ExecutionMode) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.ExecutionMode = mode
+}
+
+func (s *Session) GetExecutionMode() ExecutionMode {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	return s.ExecutionMode
 }

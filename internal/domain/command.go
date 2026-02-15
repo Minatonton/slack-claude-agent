@@ -11,6 +11,8 @@ const (
 	CommandImplement
 	CommandSwitch
 	CommandRepos
+	CommandSync  // 順次実行モード
+	CommandAsync // 並列実行モード
 )
 
 // DetectCommand detects special commands in the message text.
@@ -40,6 +42,16 @@ func DetectCommand(text string) Command {
 	// List repositories
 	if lower == "repos" || lower == "repositories" || lower == "リポジトリ" {
 		return CommandRepos
+	}
+
+	// Set execution mode to sync
+	if lower == "sync" || lower == "順次" {
+		return CommandSync
+	}
+
+	// Set execution mode to async
+	if lower == "async" || lower == "並列" {
+		return CommandAsync
 	}
 
 	return CommandNone

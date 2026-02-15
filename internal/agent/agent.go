@@ -83,12 +83,28 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 		case domain.CommandRepos:
 			a.handleListRepos(session)
 			return
+		case domain.CommandSync:
+			session.SetExecutionMode(domain.ExecutionSync)
+			a.slackClient.PostThreadMessage(channel, threadTS,
+				fmt.Sprintf(":arrow_forward: 順次実行モードに切り替えました（タスクを1つずつ順番に実行）"))
+			return
+		case domain.CommandAsync:
+			session.SetExecutionMode(domain.ExecutionAsync)
+			a.slackClient.PostThreadMessage(channel, threadTS,
+				fmt.Sprintf(":fast_forward: 並列実行モードに切り替えました（複数タスクを同時実行）"))
+			return
 		}
 
 		// Check if already running
 		if session.Running() {
-			a.slackClient.PostThreadMessage(channel, threadTS,
-				":hourglass: 現在実行中です。完了後にメッセージを処理します。しばらくお待ちください。")
+			execMode := session.GetExecutionMode()
+			if execMode == domain.ExecutionSync {
+				a.slackClient.PostThreadMessage(channel, threadTS,
+					":hourglass: 順次実行モード：現在実行中です。完了後にもう一度メンションしてください。")
+			} else {
+				a.slackClient.PostThreadMessage(channel, threadTS,
+					":warning: 並列実行モード：既に実行中です。新しいタスクを開始する場合は別のスレッドを使用してください。")
+			}
 			return
 		}
 	} else {
@@ -129,8 +145,14 @@ func (a *Agent) startNewSession(channel, threadTS, user, instruction string) {
 	a.slackClient.AddReaction(channel, threadTS, "eyes")
 
 	// Post initial message
+	execMode := session.GetExecutionMode()
+	execIcon := ":fast_forward:"
+	if execMode == domain.ExecutionSync {
+		execIcon = ":arrow_forward:"
+	}
 	msgTS, _ := a.slackClient.PostThreadMessageReturningTS(channel, threadTS,
-		fmt.Sprintf(":hourglass_flowing_sand: タスクを開始します... (リポジトリ: %s, モード: 実装)", repo.Key()))
+		fmt.Sprintf(":hourglass_flowing_sand: タスクを開始します... (リポジトリ: %s, モード: 実装, %s %s)",
+			repo.Key(), execIcon, execMode.String()))
 	session.Mu.Lock()
 	session.StatusMsgTS = msgTS
 	session.Mu.Unlock()
@@ -146,15 +168,23 @@ func (a *Agent) continueSession(session *domain.Session, instruction string) {
 
 	session.UpdateActivity()
 
-	// Post new status message
+	// Post new status message (emphasize continuation)
 	mode := session.GetMode()
 	modeIcon := ":hammer_and_wrench:"
 	if mode == domain.ModeReview {
 		modeIcon = ":mag:"
 	}
 
+	execMode := session.GetExecutionMode()
+	execIcon := ":fast_forward:"
+	if execMode == domain.ExecutionSync {
+		execIcon = ":arrow_forward:"
+	}
+
+	repo := session.GetRepository()
 	msgTS, _ := a.slackClient.PostThreadMessageReturningTS(session.Channel, session.ThreadTS,
-		fmt.Sprintf(":hourglass_flowing_sand: 処理中... (モード: %s %s)", modeIcon, mode.String()))
+		fmt.Sprintf(":speech_balloon: 会話を継続中... (リポジトリ: %s, モード: %s %s, %s %s)",
+			repo.Key(), modeIcon, mode.String(), execIcon, execMode.String()))
 	session.Mu.Lock()
 	session.StatusMsgTS = msgTS
 	session.Mu.Unlock()

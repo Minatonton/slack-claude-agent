@@ -1,24 +1,20 @@
 package config
 
 import (
-	"context"
 	"fmt"
 	"os"
-
-	secretmanager "cloud.google.com/go/secretmanager/apiv1"
-	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"strconv"
 )
 
 type Config struct {
-	// Server
-	Port string
-
 	// Slack
-	SlackSigningSecret string
-	SlackBotToken      string
+	SlackBotToken string
+	SlackAppToken string
+
+	// Workspace
+	WorkspacePath string // parent directory containing the repository
 
 	// GitHub
-	GitHubPAT     string
 	GitHubOwner   string
 	GitHubRepo    string
 	DefaultBranch string
@@ -29,42 +25,25 @@ type Config struct {
 	CoAuthorName  string
 	CoAuthorEmail string
 
-	// GCP
-	GCPProjectID string
-	GCPLocation  string
-	ClaudeModel  string
+	// Claude
+	ClaudePath    string // path to claude CLI binary
+	MaxConcurrent int    // max concurrent claude runs
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		Port:          getEnvOrDefault("PORT", "8080"),
+		SlackBotToken: os.Getenv("SLACK_BOT_TOKEN"),
+		SlackAppToken: os.Getenv("SLACK_APP_TOKEN"),
+		WorkspacePath: getEnvDefault("WORKSPACE_PATH", "."),
 		GitHubOwner:   os.Getenv("GITHUB_OWNER"),
 		GitHubRepo:    os.Getenv("GITHUB_REPO"),
-		DefaultBranch: getEnvOrDefault("DEFAULT_BRANCH", "main"),
+		DefaultBranch: getEnvDefault("DEFAULT_BRANCH", "main"),
 		AuthorName:    os.Getenv("AUTHOR_NAME"),
 		AuthorEmail:   os.Getenv("AUTHOR_EMAIL"),
-		CoAuthorName:  getEnvOrDefault("CO_AUTHOR_NAME", "Claude"),
-		CoAuthorEmail: getEnvOrDefault("CO_AUTHOR_EMAIL", "noreply+claude@anthropic.com"),
-		GCPProjectID:  os.Getenv("GCP_PROJECT_ID"),
-		GCPLocation:   getEnvOrDefault("GCP_LOCATION", "us-east5"),
-		ClaudeModel:   getEnvOrDefault("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
-	}
-
-	// Try Secret Manager first, fall back to env vars
-	ctx := context.Background()
-	cfg.SlackSigningSecret = loadSecret(ctx, cfg.GCPProjectID, "slack-signing-secret")
-	if cfg.SlackSigningSecret == "" {
-		cfg.SlackSigningSecret = os.Getenv("SLACK_SIGNING_SECRET")
-	}
-
-	cfg.SlackBotToken = loadSecret(ctx, cfg.GCPProjectID, "slack-bot-token")
-	if cfg.SlackBotToken == "" {
-		cfg.SlackBotToken = os.Getenv("SLACK_BOT_TOKEN")
-	}
-
-	cfg.GitHubPAT = loadSecret(ctx, cfg.GCPProjectID, "github-pat")
-	if cfg.GitHubPAT == "" {
-		cfg.GitHubPAT = os.Getenv("GITHUB_PAT")
+		CoAuthorName:  getEnvDefault("CO_AUTHOR_NAME", "Claude"),
+		CoAuthorEmail: getEnvDefault("CO_AUTHOR_EMAIL", "noreply+claude@anthropic.com"),
+		ClaudePath:    getEnvDefault("CLAUDE_PATH", "claude"),
+		MaxConcurrent: getEnvIntDefault("MAX_CONCURRENT", 5),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -76,15 +55,14 @@ func Load() (*Config, error) {
 
 func (c *Config) validate() error {
 	required := map[string]string{
-		"SLACK_SIGNING_SECRET": c.SlackSigningSecret,
-		"SLACK_BOT_TOKEN":     c.SlackBotToken,
-		"GITHUB_PAT":          c.GitHubPAT,
-		"GITHUB_OWNER":        c.GitHubOwner,
-		"GITHUB_REPO":         c.GitHubRepo,
-		"GCP_PROJECT_ID":      c.GCPProjectID,
-		"AUTHOR_NAME":         c.AuthorName,
-		"AUTHOR_EMAIL":        c.AuthorEmail,
+		"SLACK_BOT_TOKEN": c.SlackBotToken,
+		"SLACK_APP_TOKEN": c.SlackAppToken,
+		"GITHUB_OWNER":    c.GitHubOwner,
+		"GITHUB_REPO":     c.GitHubRepo,
+		"AUTHOR_NAME":     c.AuthorName,
+		"AUTHOR_EMAIL":    c.AuthorEmail,
 	}
+
 	for name, val := range required {
 		if val == "" {
 			return fmt.Errorf("required config %s is not set", name)
@@ -93,29 +71,21 @@ func (c *Config) validate() error {
 	return nil
 }
 
-func loadSecret(ctx context.Context, projectID, secretName string) string {
-	if projectID == "" {
-		return ""
-	}
-	client, err := secretmanager.NewClient(ctx)
-	if err != nil {
-		return ""
-	}
-	defer client.Close()
-
-	name := fmt.Sprintf("projects/%s/secrets/%s/versions/latest", projectID, secretName)
-	result, err := client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
-		Name: name,
-	})
-	if err != nil {
-		return ""
-	}
-	return string(result.Payload.Data)
-}
-
-func getEnvOrDefault(key, defaultVal string) string {
+func getEnvDefault(key, defaultVal string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return defaultVal
+}
+
+func getEnvIntDefault(key string, defaultVal int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return defaultVal
+	}
+	return n
 }

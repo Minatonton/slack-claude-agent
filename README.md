@@ -1,122 +1,141 @@
 # slack-claude-agent
 
-Slackでボットをメンションして実装を依頼すると、Vertex AI上のClaudeにコード生成を依頼し、GitHub APIでブランチ作成・コミット・PR作成まで自動で行うシステム。
+Slack でボットをメンションすると、Claude Code CLI が自動でコード生成・PR作成まで行うエージェント。
 
 ## アーキテクチャ
 
 ```
-Slack（ユーザーがボットをメンション）
-  → GCE上のGoアプリ（Webhook受信・オーケストレーション）
-    → Vertex AI Claude（コード生成）
-    → GitHub API（Git Data APIでブランチ・コミット・PR作成）
-  → Slack（結果をスレッドに返信）
+Slack（人間がメンション）
+  ↓ Socket Mode
+GCE の Go アプリ
+  ↓ exec("claude --print ...")
+Claude Code CLI
+  ↓ コード生成・Git操作・PR作成
+GitHub
+  ↓ 結果を Slack に返信
 ```
 
-## 技術スタック
+## 特徴
 
-- Go 1.22+
-- chi (HTTPルーター)
-- Vertex AI Claude (anthropic-sdk-go)
-- GitHub API (go-github/v60)
-- Slack (slack-go/slack)
-- GCP Secret Manager
-- GCE + Nginx + Let's Encrypt
+- ✅ **Claude Code CLI**: Anthropic 公式ツールを使用
+- ✅ **リアルタイム進捗**: ツール実行状況を Slack でライブ表示
+- ✅ **セマフォ制御**: 並行実行数を制限
+- ✅ **シンプル**: ji9-agent の設計を参考に実装
 
 ## セットアップ
 
-### 前提条件
+### 1. Claude Code CLI のインストール
 
-- GCPプロジェクト（Vertex AI Claude有効化済み）
-- Slack App
-- GitHubリポジトリ + Fine-grained PAT
+```bash
+npm install -g @anthropic-ai/claude-code
 
-### 1. Slack App作成
+# 認証（ブラウザが開く）
+claude auth login
+```
+
+### 2. Slack App 作成
 
 1. [api.slack.com/apps](https://api.slack.com/apps) でApp作成
-2. **Event Subscriptions** を有効化し、Request URLに `https://bot.yourdomain.com/slack/events` を設定
-3. **Subscribe to bot events** で `app_mention` を追加
-4. **OAuth & Permissions** の Bot Token Scopes に `chat:write`, `app_mentions:read` を追加
-5. ワークスペースにインストール
+2. **Settings** → **Basic Information** → **App-Level Tokens** で `connections:write` スコープを持つトークン生成（`xapp-...`）
+3. **Settings** → **Socket Mode** を有効化
+4. **Features** → **Event Subscriptions** を有効化し、**Subscribe to bot events** で `app_mention` を追加
+5. **Features** → **OAuth & Permissions** の Bot Token Scopes に `chat:write`, `app_mentions:read`, `reactions:write` を追加
+6. ワークスペースにインストールし、Bot User OAuth Token（`xoxb-...`）を取得
 
-### 2. GitHub Fine-grained PAT作成
+### 3. GitHub PAT 作成
 
-必要な権限:
+Fine-grained PAT with:
 - **Contents**: Read and write
 - **Pull requests**: Read and write
 - **Metadata**: Read-only
 
-### 3. GCPセットアップ
+### 4. 環境変数設定
 
-```bash
-# Vertex AI Claude APIを有効化
-gcloud services enable aiplatform.googleapis.com
-
-# Secret Managerにシークレット登録
-echo -n "xoxb-..." | gcloud secrets create slack-bot-token --data-file=-
-echo -n "..." | gcloud secrets create slack-signing-secret --data-file=-
-echo -n "ghp_..." | gcloud secrets create github-pat --data-file=-
-```
-
-### 4. GCEインスタンス作成
-
-```bash
-# infra/setup-gce.sh のPROJECT_IDを編集してから実行
-chmod +x infra/setup-gce.sh
-./infra/setup-gce.sh
-```
-
-### 5. 環境変数設定
-
-GCEインスタンス上の `/opt/slack-claude-agent/.env` に以下を設定:
+`.env` ファイルを作成（`infra/.env.example` 参照）:
 
 ```env
-PORT=8080
-GCP_PROJECT_ID=your-project-id
-GCP_LOCATION=us-east5
-CLAUDE_MODEL=claude-sonnet-4-20250514
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+WORKSPACE_PATH=/path/to/workspace
 GITHUB_OWNER=your-org
 GITHUB_REPO=your-repo
 DEFAULT_BRANCH=main
-AUTHOR_NAME=your-github-username
-AUTHOR_EMAIL=your-email@example.com
+AUTHOR_NAME=Your Name
+AUTHOR_EMAIL=you@example.com
+CLAUDE_PATH=claude
+MAX_CONCURRENT=5
 ```
 
-Secret Manager を使わない場合は以下も追加:
-
-```env
-SLACK_SIGNING_SECRET=...
-SLACK_BOT_TOKEN=xoxb-...
-GITHUB_PAT=ghp_...
-```
-
-### 6. デプロイ
+### 5. ビルド＆実行
 
 ```bash
-chmod +x infra/deploy.sh
-./infra/deploy.sh
+go build -o bin/server ./cmd/server
+./bin/server
 ```
 
-### 7. HTTPS設定
+## GCE デプロイ
 
-GCEインスタンス上で:
+### インスタンス作成
 
 ```bash
-sudo cp /opt/slack-claude-agent/nginx.conf /etc/nginx/sites-available/slack-claude-agent
-sudo ln -s /etc/nginx/sites-available/slack-claude-agent /etc/nginx/sites-enabled/
-sudo certbot --nginx -d bot.yourdomain.com
-sudo systemctl restart nginx
+cd infra
+# setup-gce.sh の PROJECT_ID を編集
+chmod +x setup-gce.sh
+./setup-gce.sh
+```
+
+### Claude Code CLI 認証
+
+GCE にポートフォワーディング付きで SSH:
+
+```bash
+gcloud compute ssh slack-claude-agent --zone=asia-northeast1-b -- -L 8080:localhost:8080
+```
+
+GCE 上で認証:
+
+```bash
+claude auth login
+# ブラウザが開くので認証
+```
+
+### デプロイ
+
+```bash
+chmod +x deploy.sh
+./deploy.sh
+```
+
+### Git 設定
+
+```bash
+gcloud compute ssh slack-claude-agent --zone=asia-northeast1-b
+sudo -u slackbot git config --global user.name "Bot Name"
+sudo -u slackbot git config --global user.email "bot@example.com"
 ```
 
 ## 使い方
 
-Slackでボットをメンションして指示:
+Slack でボットをメンション:
 
 ```
-@claude-agent READMEにAPI仕様のセクションを追加してください
+@bot READMEにセットアップ手順を追加してください
 ```
 
-ボットが自動で:
-1. リポジトリのファイル構成を取得
-2. Claudeにコード生成を依頼
-3. ブランチ作成・コミット・PR作成
-4. PR URLをスレッドに返信
+ボットが:
+1. コード生成
+2. ブランチ作成
+3. コミット
+4. PR作成
+5. 結果を Slack に返信
+
+## ログ確認
+
+```bash
+sudo journalctl -u slack-claude-agent -f
+```
+
+## 参考
+
+- [ji9-agent](https://github.com/kobakaito/ji9-agent) - 本実装の参考元
+- [Claude Code Docs](https://code.claude.com/docs/en/headless)

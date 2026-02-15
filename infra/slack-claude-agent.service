@@ -10,6 +10,10 @@ ExecStart=/opt/slack-claude-agent/server
 Restart=always
 RestartSec=5
 EnvironmentFile=/opt/slack-claude-agent/.env
+# Ensure PATH includes npm global binaries
+Environment="PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+# Set HOME for slackbot user (Claude Code needs it)
+Environment="HOME=/home/slackbot"
 
 [Install]
 WantedBy=multi-user.target

@@ -1,12 +1,14 @@
 package slack
 
 import (
-	"encoding/json"
-	"io"
+	"context"
 	"log/slog"
-	"net/http"
 	"sync"
 	"time"
+
+	"github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
 )
 
 type MentionHandler interface {
@@ -21,78 +23,101 @@ type Event struct {
 	TS      string `json:"ts"`
 }
 
-type slackRequest struct {
-	Token     string `json:"token"`
-	Challenge string `json:"challenge"`
-	Type      string `json:"type"`
-	EventID   string `json:"event_id"`
-	Event     Event  `json:"event"`
-}
-
 type Handler struct {
-	signingSecret   string
+	api             *slack.Client
+	socketClient    *socketmode.Client
 	mentionHandler  MentionHandler
 	processedEvents sync.Map
 }
 
-func NewHandler(signingSecret string, mentionHandler MentionHandler) *Handler {
+func NewHandler(appToken, botToken string, mentionHandler MentionHandler) *Handler {
+	api := slack.New(
+		botToken,
+		slack.OptionAppLevelToken(appToken),
+	)
+	socketClient := socketmode.New(api)
+
 	h := &Handler{
-		signingSecret:  signingSecret,
+		api:            api,
+		socketClient:   socketClient,
 		mentionHandler: mentionHandler,
 	}
-	// Periodically clean up old event IDs
 	go h.cleanupLoop()
 	return h
 }
 
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if err := VerifyRequest(h.signingSecret, r); err != nil {
-		slog.Warn("signature verification failed", "error", err)
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
-		return
-	}
+func (h *Handler) SetMentionHandler(mh MentionHandler) {
+	h.mentionHandler = mh
+}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return
-	}
+func (h *Handler) APIClient() *slack.Client {
+	return h.api
+}
 
-	var req slackRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
+func (h *Handler) Run(ctx context.Context) error {
+	go h.handleEvents(ctx)
+	return h.socketClient.RunContext(ctx)
+}
 
-	// URL verification challenge
-	if req.Type == "url_verification" {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"challenge": req.Challenge})
-		return
+func (h *Handler) handleEvents(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-h.socketClient.Events:
+			if !ok {
+				return
+			}
+			h.processEvent(evt)
+		}
 	}
+}
 
-	// Event callback
-	if req.Type == "event_callback" && req.Event.Type == "app_mention" {
-		// Dedup by event_id
-		if _, loaded := h.processedEvents.LoadOrStore(req.EventID, time.Now()); loaded {
-			slog.Info("duplicate event, skipping", "event_id", req.EventID)
-			w.WriteHeader(http.StatusOK)
+func (h *Handler) processEvent(evt socketmode.Event) {
+	switch evt.Type {
+	case socketmode.EventTypeEventsAPI:
+		eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
+		if !ok {
 			return
 		}
+		h.socketClient.Ack(*evt.Request)
 
-		slog.Info("received app_mention",
-			"event_id", req.EventID,
-			"channel", req.Event.Channel,
-			"user", req.Event.User,
-		)
+		if eventsAPIEvent.Type == slackevents.CallbackEvent {
+			// Extract EventID from the callback event data
+			var eventID string
+			if cb, ok := eventsAPIEvent.Data.(*slackevents.EventsAPICallbackEvent); ok {
+				eventID = cb.EventID
+			}
 
-		// Respond immediately, process async
-		w.WriteHeader(http.StatusOK)
-		go h.mentionHandler.HandleMention(req.Event)
-		return
+			innerEvent := eventsAPIEvent.InnerEvent
+			switch ev := innerEvent.Data.(type) {
+			case *slackevents.AppMentionEvent:
+				// Dedup by event ID
+				if eventID == "" {
+					eventID = ev.TimeStamp // fallback
+				}
+				if _, loaded := h.processedEvents.LoadOrStore(eventID, time.Now()); loaded {
+					slog.Info("duplicate event, skipping", "event_id", eventID)
+					return
+				}
+
+				slog.Info("received app_mention",
+					"event_id", eventID,
+					"channel", ev.Channel,
+					"user", ev.User,
+				)
+
+				event := Event{
+					Type:    ev.Type,
+					User:    ev.User,
+					Text:    ev.Text,
+					Channel: ev.Channel,
+					TS:      ev.TimeStamp,
+				}
+				go h.mentionHandler.HandleMention(event)
+			}
+		}
 	}
-
-	w.WriteHeader(http.StatusOK)
 }
 
 func (h *Handler) cleanupLoop() {

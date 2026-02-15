@@ -18,6 +18,7 @@ GitHub
 ## 特徴
 
 - ✅ **Claude Code CLI**: Anthropic 公式ツールを使用
+- ✅ **複数リポジトリサポート**: 1つのボットで複数リポジトリを管理
 - ✅ **リアルタイム進捗**: ツール実行状況を Slack でライブ表示
 - ✅ **セマフォ制御**: 並行実行数を制限
 - ✅ **シンプル**: ji9-agent の設計を参考に実装
@@ -52,6 +53,34 @@ Fine-grained PAT with:
 ### 4. 環境変数設定
 
 `.env` ファイルを作成（`infra/.env.example` 参照）:
+
+#### 複数リポジトリモード（推奨）
+
+複数のリポジトリを扱う場合:
+
+```env
+SLACK_BOT_TOKEN=xoxb-...
+SLACK_APP_TOKEN=xapp-...
+WORKSPACE_PATH=/path/to/workspace
+
+# カンマ区切りでリポジトリを指定（ブランチ指定は任意）
+GITHUB_REPOS=your-org/backend:main,your-org/frontend:develop,your-org/mobile
+
+# デフォルトリポジトリ（省略時は最初のリポジトリ）
+DEFAULT_GITHUB_REPO=your-org/backend
+
+# デフォルトブランチ（リポジトリでブランチ未指定時に使用）
+DEFAULT_BRANCH=main
+
+AUTHOR_NAME=Your Name
+AUTHOR_EMAIL=you@example.com
+CLAUDE_PATH=claude
+MAX_CONCURRENT=5
+```
+
+#### 単一リポジトリモード（レガシー）
+
+1つのリポジトリのみの場合:
 
 ```env
 SLACK_BOT_TOKEN=xoxb-...
@@ -145,6 +174,25 @@ Slack でボットをメンション:
 
 モード切り替え後、同じスレッドで会話を続けることができます。
 
+### リポジトリ切り替え（複数リポジトリモード時）
+
+**利用可能なリポジトリを確認**:
+```
+@bot repos
+```
+
+**リポジトリを切り替え**:
+```
+@bot switch your-org/backend
+```
+
+または日本語で:
+```
+@bot 切り替え your-org/frontend
+```
+
+切り替え後、同じスレッド内でそのリポジトリに対する操作が可能です。
+
 ### セッション管理
 
 - **複数スレッド同時実行**: 最大5スレッドまで並行処理可能（`MAX_CONCURRENT=5`）
@@ -158,6 +206,8 @@ Slack でボットをメンション:
 |---------|------|
 | `review` / `レビュー` | レビューモードに切り替え |
 | `implement` / `実装` | 実装モードに切り替え |
+| `switch owner/repo` / `切り替え owner/repo` | リポジトリを切り替え |
+| `repos` / `repositories` / `リポジトリ` | 利用可能なリポジトリ一覧を表示 |
 | `おわり` / `end` / `終了` | セッション終了 |
 
 ## ログ確認

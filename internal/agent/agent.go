@@ -17,18 +17,23 @@ import (
 var botMentionRe = regexp.MustCompile(`<@U[A-Z0-9]+>`)
 
 type Agent struct {
-	mu           sync.RWMutex
-	sessions     map[string]*domain.Session // key: threadTS
-	slackClient  *slackclient.Client
-	claudeRunner *claude.Runner
-	logger       *slog.Logger
+	mu            sync.RWMutex
+	sessions      map[string]*domain.Session    // key: threadTS
+	slackClient   *slackclient.Client
+	claudeRunner  *claude.Runner                // deprecated: for backward compatibility
+	runners       map[string]*claude.Runner     // key: repository.Key()
+	repositories  []*domain.Repository
+	defaultRepo   *domain.Repository
+	logger        *slog.Logger
 }
 
-func New(sc *slackclient.Client, runner *claude.Runner, logger *slog.Logger) *Agent {
+func New(sc *slackclient.Client, runners map[string]*claude.Runner, repos []*domain.Repository, defaultRepo *domain.Repository, logger *slog.Logger) *Agent {
 	return &Agent{
 		sessions:     make(map[string]*domain.Session),
 		slackClient:  sc,
-		claudeRunner: runner,
+		runners:      runners,
+		repositories: repos,
+		defaultRepo:  defaultRepo,
 		logger:       logger,
 	}
 }
@@ -72,12 +77,25 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 			a.slackClient.PostThreadMessage(channel, threadTS,
 				fmt.Sprintf(":hammer_and_wrench: 実装モードに切り替えました"))
 			return
+		case domain.CommandSwitch:
+			a.handleSwitchRepo(session, instruction)
+			return
+		case domain.CommandRepos:
+			a.handleListRepos(session)
+			return
 		}
 
 		// Check if already running
 		if session.Running() {
 			a.slackClient.PostThreadMessage(channel, threadTS,
 				":hourglass: 現在実行中です。完了後にメッセージを処理します。しばらくお待ちください。")
+			return
+		}
+	} else {
+		// Handle non-session commands
+		switch cmd {
+		case domain.CommandRepos:
+			a.handleListReposNoSession(channel, threadTS)
 			return
 		}
 	}
@@ -98,20 +116,21 @@ func (a *Agent) startNewSession(channel, threadTS, user, instruction string) {
 		return
 	}
 
-	session := domain.NewSession(channel, threadTS)
+	session := domain.NewSession(channel, threadTS, a.defaultRepo)
 
 	a.mu.Lock()
 	a.sessions[threadTS] = session
 	a.mu.Unlock()
 
-	a.logger.Info("new session", "thread", threadTS, "channel", channel, "user", user)
+	repo := session.GetRepository()
+	a.logger.Info("new session", "thread", threadTS, "channel", channel, "user", user, "repository", repo.Key())
 
 	// Add reaction
 	a.slackClient.AddReaction(channel, threadTS, "eyes")
 
 	// Post initial message
 	msgTS, _ := a.slackClient.PostThreadMessageReturningTS(channel, threadTS,
-		":hourglass_flowing_sand: タスクを開始します... (モード: 実装)")
+		fmt.Sprintf(":hourglass_flowing_sand: タスクを開始します... (リポジトリ: %s, モード: 実装)", repo.Key()))
 	session.Mu.Lock()
 	session.StatusMsgTS = msgTS
 	session.Mu.Unlock()
@@ -149,6 +168,19 @@ func (a *Agent) runClaude(session *domain.Session, prompt string) {
 
 	startTime := time.Now()
 
+	// Get repository-specific runner
+	repo := session.GetRepository()
+	if repo == nil {
+		a.updateMessage(session, ":x: エラー: リポジトリが設定されていません")
+		return
+	}
+
+	runner, exists := a.runners[repo.Key()]
+	if !exists {
+		a.updateMessage(session, fmt.Sprintf(":x: エラー: リポジトリ %s のRunnerが見つかりません", repo.Key()))
+		return
+	}
+
 	// Create cancellable context
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
@@ -157,7 +189,7 @@ func (a *Agent) runClaude(session *domain.Session, prompt string) {
 	session.CancelFunc = cancel
 	session.Mu.Unlock()
 
-	logger := a.logger.With("thread", session.ThreadTS, "channel", session.Channel)
+	logger := a.logger.With("thread", session.ThreadTS, "channel", session.Channel, "repository", repo.Key())
 
 	// Track progress
 	var textBuf strings.Builder
@@ -197,7 +229,7 @@ func (a *Agent) runClaude(session *domain.Session, prompt string) {
 	session.Mu.Unlock()
 
 	// Run claude
-	result, err := a.claudeRunner.Run(ctx, prompt, mode, sessionID, callback)
+	result, err := runner.Run(ctx, prompt, mode, sessionID, callback)
 	elapsed := time.Since(startTime)
 
 	if err != nil {
@@ -369,4 +401,67 @@ func formatForSlack(text string) string {
 	}
 
 	return strings.TrimSpace(strings.Join(result, "\n"))
+}
+
+func (a *Agent) handleSwitchRepo(session *domain.Session, text string) {
+	target := domain.ExtractSwitchTarget(text)
+	if target == "" {
+		a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS,
+			":warning: リポジトリ名を指定してください (例: `switch owner/repo`)")
+		return
+	}
+
+	// Find repository
+	repo := domain.FindRepository(a.repositories, target)
+	if repo == nil {
+		// Repository not found, show available repositories
+		var repoList []string
+		for _, r := range a.repositories {
+			repoList = append(repoList, fmt.Sprintf("• %s", r.Key()))
+		}
+		msg := fmt.Sprintf(":x: リポジトリ `%s` が見つかりません。利用可能なリポジトリ:\n%s",
+			target, strings.Join(repoList, "\n"))
+		a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS, msg)
+		return
+	}
+
+	// Switch repository
+	session.SetRepository(repo)
+	a.logger.Info("switched repository", "thread", session.ThreadTS, "repository", repo.Key())
+	a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS,
+		fmt.Sprintf(":arrows_counterclockwise: リポジトリを %s に切り替えました", repo.Key()))
+}
+
+func (a *Agent) handleListRepos(session *domain.Session) {
+	a.handleListReposNoSession(session.Channel, session.ThreadTS)
+}
+
+func (a *Agent) handleListReposNoSession(channel, threadTS string) {
+	currentRepo := ""
+	if threadTS != "" {
+		a.mu.RLock()
+		session, exists := a.sessions[threadTS]
+		a.mu.RUnlock()
+		if exists {
+			repo := session.GetRepository()
+			if repo != nil {
+				currentRepo = repo.Key()
+			}
+		}
+	}
+
+	var repoList []string
+	for _, r := range a.repositories {
+		marker := ""
+		if r.Key() == currentRepo {
+			marker = " :point_left: *現在のリポジトリ*"
+		} else if r.Key() == a.defaultRepo.Key() && currentRepo == "" {
+			marker = " _(デフォルト)_"
+		}
+		repoList = append(repoList, fmt.Sprintf("• %s (ブランチ: %s)%s", r.Key(), r.DefaultBranch, marker))
+	}
+
+	msg := fmt.Sprintf(":books: *利用可能なリポジトリ:*\n%s\n\nリポジトリを切り替えるには: `switch owner/repo`",
+		strings.Join(repoList, "\n"))
+	a.slackClient.PostThreadMessage(channel, threadTS, msg)
 }

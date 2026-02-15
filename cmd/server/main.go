@@ -29,23 +29,27 @@ func main() {
 	handler := slackclient.NewHandler(cfg.SlackAppToken, cfg.SlackBotToken, nil)
 	sc := slackclient.NewClient(handler.APIClient())
 
-	// Create Claude runner
-	runnerCfg := claude.Config{
-		ClaudePath:    cfg.ClaudePath,
-		WorkspacePath: cfg.WorkspacePath,
-		GitHubOwner:   cfg.GitHubOwner,
-		GitHubRepo:    cfg.GitHubRepo,
-		DefaultBranch: cfg.DefaultBranch,
-		AuthorName:    cfg.AuthorName,
-		AuthorEmail:   cfg.AuthorEmail,
-		CoAuthorName:  cfg.CoAuthorName,
-		CoAuthorEmail: cfg.CoAuthorEmail,
-		MaxConcurrent: cfg.MaxConcurrent,
+	// Create Claude runners for each repository
+	runners := make(map[string]*claude.Runner)
+	for _, repo := range cfg.Repositories {
+		runnerCfg := claude.Config{
+			ClaudePath:    cfg.ClaudePath,
+			WorkspacePath: cfg.WorkspacePath,
+			GitHubOwner:   repo.Owner,
+			GitHubRepo:    repo.Name,
+			DefaultBranch: repo.DefaultBranch,
+			AuthorName:    cfg.AuthorName,
+			AuthorEmail:   cfg.AuthorEmail,
+			CoAuthorName:  cfg.CoAuthorName,
+			CoAuthorEmail: cfg.CoAuthorEmail,
+			MaxConcurrent: cfg.MaxConcurrent,
+		}
+		runners[repo.Key()] = claude.NewRunner(runnerCfg, logger)
+		logger.Info("initialized runner for repository", "repository", repo.Key(), "branch", repo.DefaultBranch)
 	}
-	runner := claude.NewRunner(runnerCfg, logger)
 
 	// Create agent and wire it into the handler
-	ag := agent.New(sc, runner, logger)
+	ag := agent.New(sc, runners, cfg.Repositories, cfg.DefaultRepository, logger)
 	handler.SetMentionHandler(ag)
 
 	// Run Socket Mode (blocks until context is cancelled)

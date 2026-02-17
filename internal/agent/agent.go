@@ -115,6 +115,90 @@ func (a *Agent) HandleThreadMessage(event slackclient.Event) {
 	a.continueSession(session, instruction)
 }
 
+func (a *Agent) HandleSlashCommand(command, text, channel, user, responseURL string) {
+	// Map slash command to mode and instruction
+	var mode domain.AgentMode
+	var instruction string
+
+	switch command {
+	case "/claude":
+		mode = domain.ModeImplementation
+		instruction = text
+	case "/claude-review":
+		mode = domain.ModeReview
+		instruction = text
+	case "/claude-repos":
+		// Handle repos command
+		a.handleListReposNoSession(channel, "")
+		return
+	default:
+		a.slackClient.PostMessage(channel, fmt.Sprintf("未知のコマンド: %s", command))
+		return
+	}
+
+	if instruction == "" {
+		a.slackClient.PostMessage(channel, "指示が空です。コマンドの後に実装内容を指定してください。")
+		return
+	}
+
+	// Create or get session
+	// For slash commands, we use the channel as the thread key
+	// (since slash commands don't have thread_ts initially)
+	threadTS := ""
+
+	a.mu.RLock()
+	session, exists := a.sessions[channel]
+	a.mu.RUnlock()
+
+	if !exists {
+		// Post a message and use its timestamp as thread
+		msgTS, err := a.slackClient.PostMessageReturningTS(channel, fmt.Sprintf(":%s_hourglass_flowing_sand: タスクを開始します...", ""))
+		if err != nil {
+			a.slackClient.PostMessage(channel, fmt.Sprintf(":x: メッセージ送信エラー: %s", err))
+			return
+		}
+		threadTS = msgTS
+
+		session = domain.NewSession(channel, threadTS, a.defaultRepo)
+		session.SetMode(mode)
+
+		a.mu.Lock()
+		a.sessions[threadTS] = session
+		a.mu.Unlock()
+
+		a.logger.Info("new session from slash command", "thread", threadTS, "channel", channel, "user", user, "command", command, "repository", a.defaultRepo.Key())
+
+		// Add reaction
+		a.slackClient.AddReaction(channel, threadTS, "eyes")
+
+		// Update status message
+		repo := session.GetRepository()
+		execMode := session.GetExecutionMode()
+		execIcon := ":fast_forward:"
+		if execMode == domain.ExecutionSync {
+			execIcon = ":arrow_forward:"
+		}
+		modeIcon := ":hammer_and_wrench:"
+		if mode == domain.ModeReview {
+			modeIcon = ":mag:"
+		}
+		msgTS2, _ := a.slackClient.PostThreadMessageReturningTS(channel, threadTS,
+			fmt.Sprintf("%s タスクを開始します... (リポジトリ: %s, モード: %s %s, %s %s)",
+				":hourglass_flowing_sand:", repo.Key(), modeIcon, mode.String(), execIcon, execMode.String()))
+		session.Mu.Lock()
+		session.StatusMsgTS = msgTS2
+		session.Mu.Unlock()
+
+		// Run in goroutine
+		go a.runClaude(session, instruction)
+	} else {
+		// Continue existing session
+		threadTS = session.ThreadTS
+		session.SetMode(mode)
+		a.continueSession(session, instruction)
+	}
+}
+
 func (a *Agent) HandleMention(event slackclient.Event) {
 	channel := event.Channel
 	user := event.User

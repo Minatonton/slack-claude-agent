@@ -14,6 +14,7 @@ import (
 type MentionHandler interface {
 	HandleMention(event Event)
 	HandleThreadMessage(event Event)
+	HandleSlashCommand(command, text, channel, user, responseURL string)
 }
 
 type Event struct {
@@ -154,6 +155,27 @@ func (h *Handler) processEvent(evt socketmode.Event) {
 				}
 			}
 		}
+
+	case socketmode.EventTypeSlashCommand:
+		cmd, ok := evt.Data.(slack.SlashCommand)
+		if !ok {
+			return
+		}
+		h.socketClient.Ack(*evt.Request)
+
+		slog.Info("received slash_command",
+			"command", cmd.Command,
+			"channel", cmd.ChannelID,
+			"user", cmd.UserID,
+		)
+
+		go h.mentionHandler.HandleSlashCommand(
+			cmd.Command,
+			cmd.Text,
+			cmd.ChannelID,
+			cmd.UserID,
+			cmd.ResponseURL,
+		)
 	}
 }
 

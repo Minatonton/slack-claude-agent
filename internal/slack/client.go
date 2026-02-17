@@ -21,6 +21,22 @@ func (c *Client) AddReaction(channel, timestamp, emoji string) error {
 	return c.api.AddReaction(emoji, ref)
 }
 
+func (c *Client) PostMessage(channel, text string) error {
+	_, _, err := c.api.PostMessage(
+		channel,
+		slack.MsgOptionText(text, false),
+	)
+	return err
+}
+
+func (c *Client) PostMessageReturningTS(channel, text string) (string, error) {
+	_, ts, err := c.api.PostMessage(
+		channel,
+		slack.MsgOptionText(text, false),
+	)
+	return ts, err
+}
+
 func (c *Client) PostThreadMessage(channel, threadTS, text string) error {
 	_, _, err := c.api.PostMessage(
 		channel,

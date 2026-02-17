@@ -13,6 +13,7 @@ import (
 
 type MentionHandler interface {
 	HandleMention(event Event)
+	HandleThreadMessage(event Event)
 }
 
 type Event struct {
@@ -117,6 +118,40 @@ func (h *Handler) processEvent(evt socketmode.Event) {
 					ThreadTS: ev.ThreadTimeStamp, // Thread timestamp for replies
 				}
 				go h.mentionHandler.HandleMention(event)
+
+			case *slackevents.MessageEvent:
+				// Only handle thread messages (not bot messages)
+				if ev.BotID != "" {
+					return // Ignore bot messages
+				}
+
+				// Dedup by event ID
+				if eventID == "" {
+					eventID = ev.TimeStamp // fallback
+				}
+				if _, loaded := h.processedEvents.LoadOrStore(eventID, time.Now()); loaded {
+					return
+				}
+
+				// Only process messages in threads
+				if ev.ThreadTimeStamp != "" {
+					slog.Info("received thread_message",
+						"event_id", eventID,
+						"channel", ev.Channel,
+						"user", ev.User,
+						"thread_ts", ev.ThreadTimeStamp,
+					)
+
+					event := Event{
+						Type:     ev.Type,
+						User:     ev.User,
+						Text:     ev.Text,
+						Channel:  ev.Channel,
+						TS:       ev.TimeStamp,
+						ThreadTS: ev.ThreadTimeStamp,
+					}
+					go h.mentionHandler.HandleThreadMessage(event)
+				}
 			}
 		}
 	}

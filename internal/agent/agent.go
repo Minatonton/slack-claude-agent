@@ -38,6 +38,83 @@ func New(sc *slackclient.Client, runners map[string]*claude.Runner, repos []*dom
 	}
 }
 
+func (a *Agent) HandleThreadMessage(event slackclient.Event) {
+	// Only process messages in active sessions
+	threadTS := event.ThreadTS
+	if threadTS == "" {
+		return
+	}
+
+	a.mu.RLock()
+	session, exists := a.sessions[threadTS]
+	a.mu.RUnlock()
+
+	if !exists {
+		return // No session for this thread
+	}
+
+	if !session.Active() {
+		return
+	}
+
+	session.UpdateActivity()
+
+	// Extract instruction
+	instruction := strings.TrimSpace(event.Text)
+
+	// Detect commands
+	cmd := domain.DetectCommand(instruction)
+
+	// Handle commands
+	switch cmd {
+	case domain.CommandEnd:
+		a.endSession(session, event.User)
+		return
+	case domain.CommandReview:
+		session.SetMode(domain.ModeReview)
+		a.slackClient.PostThreadMessage(event.Channel, threadTS,
+			fmt.Sprintf(":mag: レビューモードに切り替えました"))
+		return
+	case domain.CommandImplement:
+		session.SetMode(domain.ModeImplementation)
+		a.slackClient.PostThreadMessage(event.Channel, threadTS,
+			fmt.Sprintf(":hammer_and_wrench: 実装モードに切り替えました"))
+		return
+	case domain.CommandSwitch:
+		a.handleSwitchRepo(session, instruction)
+		return
+	case domain.CommandRepos:
+		a.handleListRepos(session)
+		return
+	case domain.CommandSync:
+		session.SetExecutionMode(domain.ExecutionSync)
+		a.slackClient.PostThreadMessage(event.Channel, threadTS,
+			fmt.Sprintf(":arrow_forward: 順次実行モードに切り替えました（タスクを1つずつ順番に実行）"))
+		return
+	case domain.CommandAsync:
+		session.SetExecutionMode(domain.ExecutionAsync)
+		a.slackClient.PostThreadMessage(event.Channel, threadTS,
+			fmt.Sprintf(":fast_forward: 並列実行モードに切り替えました（複数タスクを同時実行）"))
+		return
+	}
+
+	// Check if already running
+	if session.Running() {
+		execMode := session.GetExecutionMode()
+		if execMode == domain.ExecutionSync {
+			a.slackClient.PostThreadMessage(event.Channel, threadTS,
+				":hourglass: 順次実行モード：現在実行中です。完了後にもう一度メッセージを送信してください。")
+		} else {
+			a.slackClient.PostThreadMessage(event.Channel, threadTS,
+				":warning: 並列実行モード：既に実行中です。新しいタスクを開始する場合は別のスレッドを使用してください。")
+		}
+		return
+	}
+
+	// Continue session
+	a.continueSession(session, instruction)
+}
+
 func (a *Agent) HandleMention(event slackclient.Event) {
 	channel := event.Channel
 	user := event.User

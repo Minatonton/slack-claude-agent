@@ -39,8 +39,14 @@ claude auth login
 1. [api.slack.com/apps](https://api.slack.com/apps) でApp作成
 2. **Settings** → **Basic Information** → **App-Level Tokens** で `connections:write` スコープを持つトークン生成（`xapp-...`）
 3. **Settings** → **Socket Mode** を有効化
-4. **Features** → **Event Subscriptions** を有効化し、**Subscribe to bot events** で `app_mention` を追加
-5. **Features** → **OAuth & Permissions** の Bot Token Scopes に `chat:write`, `app_mentions:read`, `reactions:write` を追加
+4. **Features** → **Event Subscriptions** を有効化し、**Subscribe to bot events** で以下を追加:
+   - `app_mention` (ボットへのメンション)
+   - `message.channels` (スレッド内のメッセージ)
+5. **Features** → **OAuth & Permissions** の Bot Token Scopes に以下を追加:
+   - `chat:write` (メッセージ送信)
+   - `app_mentions:read` (メンション受信)
+   - `reactions:write` (リアクション追加)
+   - `channels:history` (チャンネル履歴読み取り)
 6. ワークスペースにインストールし、Bot User OAuth Token（`xoxb-...`）を取得
 
 ### 3. GitHub PAT 作成
@@ -173,6 +179,19 @@ Slack でボットをメンション:
 ```
 
 モード切り替え後、同じスレッドで会話を続けることができます。
+
+**スレッド内での会話**:
+一度セッションが開始されたスレッド内では、ボットをメンションせずにメッセージを送信するだけで会話を続けることができます:
+```
+# 最初はメンションが必要
+@bot READMEを作成してください
+
+# タスク完了後、同じスレッド内ではメンションなしでOK
+もっと詳しく書いて
+
+# さらに続けて
+英語版も作って
+```
 
 ### リポジトリ切り替え（複数リポジトリモード時）
 

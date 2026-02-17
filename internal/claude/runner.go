@@ -135,11 +135,17 @@ git commit -m "Your commit message
 
 Co-Authored-By: %s <%s>"
 
-CRITICAL RULES:
-- NEVER merge any branch into main/master/develop
-- NEVER push directly to %s
-- NEVER force push (git push -f, git push --force)
-- Always create a feature branch and push to that branch, then create a PR
+CRITICAL RULES (MUST FOLLOW):
+- NEVER EVER merge any branch into main/master/develop
+- NEVER EVER push directly to %s (protected branch)
+- NEVER EVER force push (git push -f, git push --force)
+- NEVER run 'git push origin main' or 'git push origin master'
+- ALWAYS create a feature branch (e.g., feature/your-feature-name)
+- ALWAYS push to the feature branch only
+- ALWAYS create a pull request using 'gh pr create'
+- If you accidentally try to push to main, STOP immediately and create a feature branch instead
+
+These rules are NON-NEGOTIABLE. Violating them will result in permanent data loss.
 `,
 		r.githubOwner,
 		r.githubRepo,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync"
@@ -95,6 +96,9 @@ func (a *Agent) HandleThreadMessage(event slackclient.Event) {
 		session.SetExecutionMode(domain.ExecutionAsync)
 		a.slackClient.PostThreadMessage(event.Channel, threadTS,
 			fmt.Sprintf(":fast_forward: 並列実行モードに切り替えました（複数タスクを同時実行）"))
+		return
+	case domain.CommandPRs:
+		a.handleListPRs(session)
 		return
 	}
 
@@ -251,6 +255,9 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 		case domain.CommandRepos:
 			a.handleListRepos(session)
 			return
+		case domain.CommandPRs:
+			a.handleListPRs(session)
+			return
 		case domain.CommandSync:
 			session.SetExecutionMode(domain.ExecutionSync)
 			a.slackClient.PostThreadMessage(channel, threadTS,
@@ -280,6 +287,9 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 		switch cmd {
 		case domain.CommandRepos:
 			a.handleListReposNoSession(channel, threadTS)
+			return
+		case domain.CommandPRs:
+			a.handleListPRsNoSession(channel, threadTS)
 			return
 		}
 	}
@@ -622,5 +632,58 @@ func (a *Agent) handleListReposNoSession(channel, threadTS string) {
 
 	msg := fmt.Sprintf(":books: *利用可能なリポジトリ:*\n%s\n\nリポジトリを切り替えるには: `switch owner/repo`",
 		strings.Join(repoList, "\n"))
+	a.slackClient.PostThreadMessage(channel, threadTS, msg)
+}
+
+func (a *Agent) handleListPRs(session *domain.Session) {
+	a.handleListPRsNoSession(session.Channel, session.ThreadTS)
+}
+
+func (a *Agent) handleListPRsNoSession(channel, threadTS string) {
+	// Get current repository
+	var repo *domain.Repository
+	if threadTS != "" {
+		a.mu.RLock()
+		session, exists := a.sessions[threadTS]
+		a.mu.RUnlock()
+		if exists {
+			repo = session.GetRepository()
+		}
+	}
+	if repo == nil {
+		repo = a.defaultRepo
+	}
+
+	a.logger.Info("listing PRs", "repository", repo.Key())
+
+	// Execute gh pr list
+	cmd := exec.Command("gh", "pr", "list", "--repo", fmt.Sprintf("https://github.com/%s/%s", repo.Owner, repo.Name), "--limit", "10")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		a.slackClient.PostThreadMessage(channel, threadTS,
+			fmt.Sprintf(":x: PR一覧の取得に失敗しました: %s\n```\n%s\n```", err, string(output)))
+		return
+	}
+
+	outputStr := strings.TrimSpace(string(output))
+	if outputStr == "" {
+		a.slackClient.PostThreadMessage(channel, threadTS,
+			fmt.Sprintf(":mag: *%s のPR一覧:*\n\n現在、オープンなPRはありません。", repo.Key()))
+		return
+	}
+
+	// Format output for Slack
+	lines := strings.Split(outputStr, "\n")
+	var prList []string
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		// GitHub CLI output format: "#123  PR Title  branch-name"
+		prList = append(prList, "• "+line)
+	}
+
+	msg := fmt.Sprintf(":mag: *%s のPR一覧:*\n```\n%s\n```",
+		repo.Key(), strings.Join(prList, "\n"))
 	a.slackClient.PostThreadMessage(channel, threadTS, msg)
 }

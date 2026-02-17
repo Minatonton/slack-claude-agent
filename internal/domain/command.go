@@ -13,6 +13,7 @@ const (
 	CommandRepos
 	CommandSync  // 順次実行モード
 	CommandAsync // 並列実行モード
+	CommandPRs   // PR一覧表示
 )
 
 // DetectCommand detects special commands in the message text.
@@ -52,6 +53,11 @@ func DetectCommand(text string) Command {
 	// Set execution mode to async
 	if lower == "async" || lower == "並列" {
 		return CommandAsync
+	}
+
+	// List pull requests
+	if lower == "prs" || lower == "pr" || lower == "pr list" || lower == "プルリク" {
+		return CommandPRs
 	}
 
 	return CommandNone

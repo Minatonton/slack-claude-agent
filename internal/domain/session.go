@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type AgentMode int
@@ -51,7 +53,6 @@ type Session struct {
 	Mode          AgentMode
 	ExecutionMode ExecutionMode // Sync or Async execution
 	Repository    *Repository   // Current repository for this session
-	SessionID     string        // Claude session ID for resume
 	IsRunning     bool
 	IsActive      bool
 	StatusMsgTS   string
@@ -138,4 +139,10 @@ func (s *Session) GetExecutionMode() ExecutionMode {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 	return s.ExecutionMode
+}
+
+// GenerateTaskID generates a unique task ID for each Claude execution.
+// This prevents context mixing when running tasks in parallel.
+func (s *Session) GenerateTaskID() string {
+	return uuid.New().String()
 }

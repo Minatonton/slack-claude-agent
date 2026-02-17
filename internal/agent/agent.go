@@ -68,6 +68,9 @@ func (a *Agent) HandleThreadMessage(event slackclient.Event) {
 
 	// Handle commands
 	switch cmd {
+	case domain.CommandStop:
+		a.stopExecution(session)
+		return
 	case domain.CommandEnd:
 		a.endSession(session, event.User)
 		return
@@ -236,6 +239,9 @@ func (a *Agent) HandleMention(event slackclient.Event) {
 		session.UpdateActivity()
 
 		switch cmd {
+		case domain.CommandStop:
+			a.stopExecution(session)
+			return
 		case domain.CommandEnd:
 			a.endSession(session, user)
 			return
@@ -432,25 +438,21 @@ func (a *Agent) runClaude(session *domain.Session, prompt string) {
 
 	// Get session info
 	mode := session.GetMode()
-	session.Mu.Lock()
-	sessionID := session.SessionID
-	session.Mu.Unlock()
 
-	// Run claude
-	result, err := runner.Run(ctx, prompt, mode, sessionID, callback)
+	// Generate unique task ID to prevent context mixing in parallel execution
+	// Each task gets its own independent Claude session
+	taskID := session.GenerateTaskID()
+	logger.Info("generated task ID", "task_id", taskID)
+
+	// Run claude without resuming from previous sessions
+	// This ensures each task is independent and prevents context mixing
+	result, err := runner.Run(ctx, prompt, mode, "", callback)
 	elapsed := time.Since(startTime)
 
 	if err != nil {
-		logger.Error("claude run failed", "error", err)
+		logger.Error("claude run failed", "error", err, "task_id", taskID)
 		a.updateMessage(session, fmt.Sprintf(":x: Claude実行エラー: %s", err))
 		return
-	}
-
-	// Store session ID for resume
-	if result != nil && result.SessionID != "" {
-		session.Mu.Lock()
-		session.SessionID = result.SessionID
-		session.Mu.Unlock()
 	}
 
 	// Build final message
@@ -469,6 +471,22 @@ func (a *Agent) runClaude(session *domain.Session, prompt string) {
 	// Add completion reaction
 	a.slackClient.AddReaction(session.Channel, session.ThreadTS, "white_check_mark")
 	logger.Info("task completed successfully", "mode", mode.String())
+}
+
+func (a *Agent) stopExecution(session *domain.Session) {
+	session.Mu.Lock()
+	cancelFunc := session.CancelFunc
+	session.Mu.Unlock()
+
+	if cancelFunc != nil {
+		cancelFunc()
+		a.logger.Info("stopping execution", "thread", session.ThreadTS)
+		a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS,
+			":octagonal_sign: 実行を停止しました。")
+	} else {
+		a.slackClient.PostThreadMessage(session.Channel, session.ThreadTS,
+			":information_source: 実行中のタスクがありません。")
+	}
 }
 
 func (a *Agent) endSession(session *domain.Session, user string) {

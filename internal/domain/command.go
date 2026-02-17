@@ -14,11 +14,17 @@ const (
 	CommandSync  // 順次実行モード
 	CommandAsync // 並列実行モード
 	CommandPRs   // PR一覧表示
+	CommandStop  // 緊急停止
 )
 
 // DetectCommand detects special commands in the message text.
 func DetectCommand(text string) Command {
 	lower := strings.ToLower(strings.TrimSpace(text))
+
+	// Stop execution
+	if lower == "stop" || lower == "cancel" || lower == "停止" || lower == "ストップ" || lower == "キャンセル" {
+		return CommandStop
+	}
 
 	// End session
 	if lower == "おわり" || lower == "end" || lower == "終了" {
